@@ -1,0 +1,16 @@
+{
+	"compatibility_date": "2025-10-08",
+	"main": "src/index.ts",
+	"name": "pm-d1worker",
+	"upload_source_maps": true,
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_id": "1666fa36-08a8-4c11-8726-1305830628ec",
+			"database_name": "test_power_monitor"
+		}
+	],
+	"observability": {
+		"enabled": true
+	}
+}
