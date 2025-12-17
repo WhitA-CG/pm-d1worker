@@ -1,10 +1,7 @@
-function base64ToUint8Array(b64: string): Uint8Array {
-  const bin = atob(b64);
-  const arr = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) {
-    arr[i] = bin.charCodeAt(i);
-  }
-  return arr;
+function readInt64LE(view: DataView, offset: number): number {
+  const low = view.getUint32(offset, true);
+  const high = view.getUint32(offset + 4, true);
+  return high * 2 ** 32 + low;
 }
 
 function decodeDailyRawData(buffer: ArrayBuffer): number[] {
@@ -26,145 +23,78 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     try {
       const url = new URL(request.url);
+      const buf = await request.arrayBuffer();
+      const view = new DataView(buf);
 
       // ===============================
-      // POST /insert-history
+      // INSERT
       // ===============================
       if (request.method === "POST" && url.pathname === "/insert-history") {
-        const body = await request.json();
-
-        // ---- validation ----
-        if (!Array.isArray(body.guid) || body.guid.length !== 16) {
-          return new Response("Invalid guid", { status: 400 });
+        if (buf.byteLength !== 120) {
+          return new Response("Invalid binary length", { status: 400 });
         }
 
-        if (typeof body.datetime !== "number") {
-          return new Response("Invalid datetime", { status: 400 });
-        }
-
-        if (typeof body.rawData !== "string") {
-          return new Response("Invalid rawData", { status: 400 });
-        }
-
-        let raw: Uint8Array;
-        try {
-          raw = base64ToUint8Array(body.rawData);
-        } catch {
-          return new Response("Invalid base64 rawData", { status: 400 });
-        }
+        const guid = new Uint8Array(buf.slice(0, 16));
+        const datetime = readInt64LE(view, 16);
+        const raw = new Uint8Array(buf.slice(24));
 
         if (raw.byteLength !== 96) {
-          return new Response(
-            `Invalid RawData length ${raw.byteLength}`,
-            { status: 400 }
-          );
+          return new Response("Invalid RawData", { status: 400 });
         }
 
-        const guid = new Uint8Array(body.guid);
-
-        // ---- upsert (UPDATE -> INSERT) ----
-        const update = await env.DB
-          .prepare(
-            `UPDATE historyData
-             SET RawData = ?
-             WHERE Guid = ? AND Datetime = ?`
-          )
-          .bind(raw, guid, body.datetime)
+        await env.DB.prepare(
+          `INSERT OR REPLACE INTO historyData (Guid, Datetime, RawData)
+           VALUES (?, ?, ?)`
+        )
+          .bind(guid, datetime, raw)
           .run();
 
-        if (update.meta.changes === 0) {
-          await env.DB
-            .prepare(
-              `INSERT INTO historyData (Guid, Datetime, RawData)
-               VALUES (?, ?, ?)`
-            )
-            .bind(guid, body.datetime, raw)
-            .run();
-        }
-
-        return new Response(
-          JSON.stringify({ ok: true }),
-          {
-            status: 200,
-            headers: {
-              "content-type": "application/json"
-            }
-          }
-        );
+        return new Response("OK", { status: 200 });
       }
 
       // ===============================
-      // POST /query-history
+      // QUERY
       // ===============================
       if (request.method === "POST" && url.pathname === "/query-history") {
-        const body = await request.json();
-
-        if (!Array.isArray(body.guid) || body.guid.length !== 16) {
-          return new Response("Invalid guid", { status: 400 });
+        if (buf.byteLength !== 24) {
+          return new Response("Invalid binary length", { status: 400 });
         }
 
-        if (typeof body.datetime !== "number") {
-          return new Response("Invalid datetime", { status: 400 });
-        }
+        const guid = new Uint8Array(buf.slice(0, 16));
+        const datetime = readInt64LE(view, 16);
 
-        const guid = new Uint8Array(body.guid);
-
-        const row = await env.DB
-          .prepare(
-            `SELECT RawData
-             FROM historyData
-             WHERE Guid = ? AND Datetime = ?`
-          )
-          .bind(guid, body.datetime)
+        const row = await env.DB.prepare(
+          `SELECT RawData
+           FROM historyData
+           WHERE Guid = ? AND Datetime = ?`
+        )
+          .bind(guid, datetime)
           .first();
 
         if (!row || !row.RawData) {
-          return new Response(
-            JSON.stringify({ hours: [] }),
-            {
-              status: 404,
-              headers: { "content-type": "application/json" }
-            }
-          );
+          return new Response("Not Found", { status: 404 });
         }
 
-        let buffer: ArrayBuffer;
+        const raw =
+          row.RawData instanceof Uint8Array
+            ? row.RawData
+            : new Uint8Array(row.RawData);
 
-        if (row.RawData instanceof ArrayBuffer) {
-          buffer = row.RawData;
-        } else if (row.RawData instanceof Uint8Array) {
-          buffer = row.RawData.buffer;
-        } else {
-          return new Response(
-            "Corrupted RawData",
-            { status: 500 }
-          );
+        if (raw.byteLength !== 96) {
+          return new Response("Corrupted RawData", { status: 500 });
         }
 
-        const hours = decodeDailyRawData(buffer);
-
-        return new Response(
-          JSON.stringify({
-            datetime: body.datetime,
-            hours
-          }),
-          {
-            status: 200,
-            headers: { "content-type": "application/json" }
+        return new Response(raw, {
+          status: 200,
+          headers: {
+            "content-type": "application/octet-stream"
           }
-        );
+        });
       }
 
-      // ===============================
-      // fallback
-      // ===============================
       return new Response("Not Found", { status: 404 });
-
-    } catch (err: any) {
-      return new Response(
-        `Worker error: ${err?.message ?? err}`,
-        { status: 500 }
-      );
+    } catch (e: any) {
+      return new Response(`Worker error: ${e.message}`, { status: 500 });
     }
   }
 };
