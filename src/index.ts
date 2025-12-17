@@ -1,3 +1,12 @@
+function base64ToUint8Array(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    arr[i] = bin.charCodeAt(i);
+  }
+  return arr;
+}
+
 function decodeDailyRawData(buffer: ArrayBuffer): number[] {
   if (buffer.byteLength !== 96) {
     throw new Error("Invalid RawData length");
@@ -13,15 +22,6 @@ function decodeDailyRawData(buffer: ArrayBuffer): number[] {
   return hours;
 }
 
-function base64ToUint8Array(b64: string): Uint8Array {
-  const bin = atob(b64);
-  const arr = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) {
-    arr[i] = bin.charCodeAt(i);
-  }
-  return arr;
-}
-
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     try {
@@ -33,6 +33,7 @@ export default {
       if (request.method === "POST" && url.pathname === "/insert-history") {
         const body = await request.json();
 
+        // ---- validation ----
         if (!Array.isArray(body.guid) || body.guid.length !== 16) {
           return new Response("Invalid guid", { status: 400 });
         }
@@ -61,7 +62,7 @@ export default {
 
         const guid = new Uint8Array(body.guid);
 
-        // ---- upsert without REPLACE ----
+        // ---- upsert (UPDATE -> INSERT) ----
         const update = await env.DB
           .prepare(
             `UPDATE historyData
@@ -83,7 +84,12 @@ export default {
 
         return new Response(
           JSON.stringify({ ok: true }),
-          { headers: { "content-type": "application/json" } }
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
         );
       }
 
@@ -115,23 +121,37 @@ export default {
         if (!row || !row.RawData) {
           return new Response(
             JSON.stringify({ hours: [] }),
-            { status: 404, headers: { "content-type": "application/json" } }
+            {
+              status: 404,
+              headers: { "content-type": "application/json" }
+            }
           );
         }
 
-        const buf =
-          row.RawData instanceof ArrayBuffer
-            ? row.RawData
-            : row.RawData.buffer;
+        let buffer: ArrayBuffer;
 
-        const hours = decodeDailyRawData(buf);
+        if (row.RawData instanceof ArrayBuffer) {
+          buffer = row.RawData;
+        } else if (row.RawData instanceof Uint8Array) {
+          buffer = row.RawData.buffer;
+        } else {
+          return new Response(
+            "Corrupted RawData",
+            { status: 500 }
+          );
+        }
+
+        const hours = decodeDailyRawData(buffer);
 
         return new Response(
           JSON.stringify({
             datetime: body.datetime,
             hours
           }),
-          { headers: { "content-type": "application/json" } }
+          {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          }
         );
       }
 
